@@ -2,7 +2,7 @@
 
 ## 1. System Overview
 
-The **Autonomous Drone Routing System** is an autonomous routing framework that combines natural-language task interpretation, A\* pathfinding, formal safety verification using Z3/SMT, perception and state estimation, execution, and SQLite decision logging.
+The **Autonomous Drone Routing System** is an autonomous routing framework that combines natural-language task interpretation, A\* pathfinding, adaptive movement decisions, formal safety verification using Z3/SMT, perception and state estimation, execution, and SQLite decision logging.
 
 The main pipeline is:
 
@@ -11,9 +11,13 @@ Operator Command
        ↓
 LLM / Fallback Parser
        ↓
-Structured Drone Task
+Structured Drone Tasks
        ↓
 A* Route Planning
+       ↓
+Adaptive Pilot
+       ↓
+Time-Aware Multi-Drone Scheduling
        ↓
 Z3 / SMT Verification
        ↓
@@ -28,7 +32,7 @@ Reject     Execute
 
 The project supports both **natural-language input** and **manual input** through the Streamlit dashboard.
 
-The LLM proposes the task, A\* proposes the route, and Z3 acts as the formal safety gate before execution.
+The LLM proposes the task, A\* proposes the spatial route, the Adaptive Pilot provides advisory movement decisions, and Z3 acts as the formal safety gate before execution.
 
 ---
 
@@ -36,15 +40,15 @@ The LLM proposes the task, A\* proposes the route, and Z3 acts as the formal saf
 
 ### Step 1 — Natural-language command
 
-The operator enters a command such as:
+The operator can enter a command such as:
 
-> Take Drone-03 to the airport and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
+> Take Drone-03 to the supermarket and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
 
 The parser identifies every explicitly named drone, its destination, and the requested deadline.
 
-For multi-drone commands, the parser creates a separate task for each named drone rather than dropping any of the explicitly mentioned drones.
+For multi-drone commands, the parser creates a separate task for each explicitly named drone.
 
-If the OpenAI API is unavailable, the parser uses the built-in regex fallback so that the natural-language interface can still operate.
+If the OpenAI API is unavailable, the parser uses the built-in regex fallback for supported command structures.
 
 ### Step 2 — Route planning with A\*
 
@@ -60,17 +64,40 @@ The environment uses:
 
 A\* uses the Manhattan-distance heuristic and terrain costs when selecting a route.
 
+The planner uses a conservative battery bound so that the route can be checked before execution.
+
 ### Step 3 — Battery model
 
 The simulated drone movement uses a random actual battery drain of approximately **1.5%–3.0% per movement step**.
 
-For planning and safety verification, the system uses **3.0% as the worst-case movement-drain bound**. This provides a conservative safety check while the execution simulation can vary between 1.5% and 3.0%.
+For planning and safety verification, the system uses **3.0% as the worst-case movement-drain bound**.
 
 Each movement step represents **15 minutes** of simulated time.
 
-### Step 4 — Automatic charging
+A reserve battery level of **15%** is maintained when calculating charging requirements.
 
-Charging is handled automatically by the system when a drone does not have enough battery to safely reach its destination.
+### Step 4 — Adaptive Pilot
+
+The system includes a lightweight **Adaptive Pilot** that provides an advisory movement decision alongside the planned A\* route.
+
+The pilot uses a tabular Q-learning-style state/action structure. Its state representation considers factors such as:
+
+- Terrain type
+- Local congestion
+- Battery band
+
+The available movement decisions are:
+
+- **PROCEED**
+- **CAUTIOUS_WAIT**
+
+The pilot is deliberately limited in authority. It can advise a short wait before a movement, but it cannot override A\*, remove a safety constraint, or bypass Z3 verification.
+
+The formal verification layer therefore remains the final safety gate.
+
+### Step 5 — Automatic charging
+
+Charging is handled automatically when a drone does not have enough battery to safely reach its destination while maintaining the required reserve.
 
 The system first checks whether the drone can reach the destination directly. If it cannot, it searches for a suitable charging pad and plans:
 
@@ -78,13 +105,15 @@ The system first checks whether the drone can reach the destination directly. If
 Drone → Charging Pad → Destination
 ```
 
-The required charge level is calculated from the remaining route energy requirement plus the configured reserve battery percentage. The system rejects a charging plan if the required target would exceed 100% battery.
+The required charge level is calculated from the remaining route energy requirement plus the reserve battery percentage.
 
-Charging time is calculated from the amount of energy required and the charging-pad power.
+If the required charging target would exceed 100%, the plan is rejected.
 
-The operator does not need to manually specify a charge percentage.
+Charging time is calculated from the required energy and the charging-pad power.
 
-### Step 5 — Multi-drone coordination
+The operator does not need to manually specify a charging percentage for the natural-language workflow.
+
+### Step 6 — Multi-drone coordination
 
 When multiple drones are sent at the same time, the system creates a time-aware schedule before execution.
 
@@ -92,19 +121,19 @@ The collision rules are:
 
 1. Two drones cannot occupy the **same tile at the same time**.
 2. Two drones cannot use the **same charging pad at the same time**.
-3. Drones are allowed to use the same route at different times.
+3. Drones may use the same route at different times.
 4. A drone may pass through another drone's previous path after that drone has cleared the cell.
 5. There is no additional edge-swap restriction.
 
-If two drones would conflict, the drone with the **higher starting battery** waits in its previous tile while the lower-starting-battery drone gets priority and clears the conflicting location.
+If two drones would conflict, the scheduling layer can insert waiting time while preserving the spatial route.
 
-The schedule is then formally checked before execution.
+The scheduling order uses starting battery as the priority signal, with the lower-starting-battery drone receiving priority when a conflict requires one drone to wait.
 
-### Step 6 — Z3 / SMT verification
+### Step 7 — Z3 / SMT verification
 
-The proposed route and schedule are passed to the Z3 SMT verifier.
+The proposed route and time-expanded schedule are passed to the Z3 SMT verifier.
 
-For battery safety, the verifier models the battery evolution as:
+For battery safety, the verifier models:
 
 ```text
 Battery(i) = Battery(i-1) - Drain × CellCost
@@ -122,16 +151,16 @@ For multi-drone execution, the verifier also checks the time-expanded schedule s
 
 If the constraints are satisfiable, the plan is marked **verified**. If verification fails, the system does not execute the proposed movement.
 
-### Step 7 — Execution
+### Step 8 — Execution
 
 The project follows a **verify-before-execute** design.
 
 - **Verify Plan** calculates and verifies the route without moving the drone.
-- **Drive** verifies the plan and only then executes it.
+- **Deliver** verifies the plan and only then executes it.
 
 A failed verification therefore leaves the affected drone stationary.
 
-### Step 8 — Perception and state estimation
+### Step 9 — Perception and state estimation
 
 The system simulates imperfect perception by generating noisy measurements of:
 
@@ -141,13 +170,13 @@ The system simulates imperfect perception by generating noisy measurements of:
 
 A lightweight 1D Kalman filter estimates the underlying state from these noisy observations.
 
-The dashboard displays the relationship between:
+The dashboard displays:
 
 ```text
 True State → Noisy Measurement → Estimated State
 ```
 
-### Step 9 — Database and decision logging
+### Step 10 — Database and decision logging
 
 SQLite is used as the persistent memory and event-log layer.
 
@@ -161,44 +190,85 @@ The database records information about:
 - Execution results
 - Timestamped system events
 
-This creates an auditable record of the system's decisions and execution history.
+This creates an auditable record of system decisions and execution history.
 
 ---
 
-## 3. Natural-Language Demo Prompt
+## 3. Default Demonstration
 
-Use the following prompt in the Streamlit natural-language input box to demonstrate the multi-drone system:
+The Streamlit dashboard opens with the following default multi-drone command:
 
 ```text
-Take Drone-03 to the airport and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
+Take Drone-03 to the supermerket and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
 ```
 
-This prompt intentionally names **four drones** and gives them the same destination and deadline. The parser should preserve all four drone IDs:
+The default map seed is:
 
-- Drone-03 → Airport
-- Drone-04 → Airport
-- Drone-01 → Airport
-- Drone-02 → Airport
+```text
+8695665
+```
 
-The deadline is **11:00 PM**.
+Another map seed to try:
+
+```text
+9385349
+```
+
+The demonstration therefore starts with four drones assigned to the airport and an 11:00 PM deadline.
 
 ---
 
-## 4. How to Run the Project — Windows PowerShell
+## 4. System Architecture
+
+```text
+                         Natural Language
+                               ↓
+                    LLM / Fallback Parser
+                               ↓
+                      Structured Tasks
+                               ↓
+                              A*
+                               ↓
+                    Terrain-Aware Routes
+                               ↓
+                       Adaptive Pilot
+                               ↓
+                  Time-Aware Scheduling
+                               ↓
+                          Z3 / SMT
+                               ↓
+                         Verified?
+                        ↙         ↘
+                     Reject      Execute
+                                  ↓
+                         SQLite / Dashboard
+```
+
+The architecture deliberately separates:
+
+- **Task interpretation**
+- **Route generation**
+- **Adaptive movement advice**
+- **Scheduling**
+- **Formal safety verification**
+- **Execution**
+- **Memory and logging**
+
+The LLM is not trusted to directly control the drone. A proposed action must pass the formal verification layer before it can change the simulated drone state.
+
+---
+
+## 5. How to Run the Project — Windows PowerShell
 
 Open **PowerShell** and navigate to the project folder.
 
 ### Step 1 — Go to the project directory
 
-If the project folder is already open in your terminal, you can skip this step.
-
-Otherwise:
-
 ```powershell
 cd "path\to\drone_delivery_project"
 ```
 
-For example, if the project is inside your Downloads folder:
+For example:
 
 ```powershell
 cd "$HOME\Downloads\drone_delivery_project"
@@ -206,23 +276,13 @@ cd "$HOME\Downloads\drone_delivery_project"
 
 ### Step 2 — Install the required packages
 
-Run:
-
 ```powershell
 pip install -r requirements.txt
 ```
 
-Wait for the installation to finish before continuing.
-
 ### Step 3 — Set the OpenAI API key
 
-Before starting Streamlit, run:
-
-```powershell
-$env:OPENAI_API_KEY=""
-```
-
-Then put your actual OpenAI API key between the quotation marks. For example:
+Before starting Streamlit:
 
 ```powershell
 $env:OPENAI_API_KEY="YOUR_API_KEY_HERE"
@@ -234,23 +294,19 @@ This environment variable applies to the current PowerShell session.
 
 ### Step 4 — Start the Streamlit dashboard
 
-Run:
-
 ```powershell
 streamlit run dashboard.py
 ```
 
-Streamlit will start the application and provide a local address, normally similar to:
+Streamlit will provide a local address, normally similar to:
 
 ```text
-Local URL: http://localhost:8501
+http://localhost:8501
 ```
 
 Open that address in your browser if it does not open automatically.
 
 ### Complete command sequence
-
-For a fresh terminal session, the complete sequence is:
 
 ```powershell
 cd "path\to\drone_delivery_project"
@@ -261,69 +317,73 @@ streamlit run dashboard.py
 
 ---
 
-## 5. Running Without an API Key
+## 6. Running Without an API Key
 
 The OpenAI API key is not strictly required for the application to run.
 
 If no API key is available, the natural-language parser can use its regex-based fallback parser for supported command structures.
 
-However, for the full **GPT-5-mini natural-language demonstration**, set the API key before launching Streamlit:
-
-```powershell
-$env:OPENAI_API_KEY="YOUR_API_KEY_HERE"
-```
+For the full GPT-5-mini natural-language workflow, set the API key before launching Streamlit.
 
 ---
 
-## 6. Main Files
+## 7. Main Files
 
-| File                  | Purpose                                                                                 |
-| --------------------- | --------------------------------------------------------------------------------------- |
-| `models.py`           | Drone models, station grid, obstacles, terrain and charging-pad configuration           |
-| `llm_parser.py`       | Natural-language command parsing, structured task generation and fallback parsing       |
-| `pathfinding.py`      | Lab 1-derived terrain-aware A\* pathfinding                                             |
-| `verifier.py`         | Z3/SMT route, battery and multi-drone schedule verification                             |
-| `orchestrator.py`     | Integrates parsing, planning, charging, scheduling, verification, execution and logging |
-| `perception.py`       | Noisy sensor simulation and Kalman-based state estimation                               |
-| `database.py`         | SQLite database and event logging                                                       |
-| `dashboard.py`        | Streamlit user interface                                                                |
-| `CLASS_CODE_REUSE.md` | Mapping between the original class/lab implementations and the project                  |
-| `Documentation.md`    | Technical description of the system architecture and methodology                        |
-
----
-
-## 7. Class-Code Reuse
-
-The project preserves the main class algorithms and adapts them to the drone-routing problem.
-
-- **Lab 1 `planner.py` → `pathfinding.py`**: Node representation, A\* open/closed sets, `g/h/f` scores, heap queue, heuristic calculation, neighbour expansion and parent-based path reconstruction.
-- **ReAct Lab → `llm_parser.py`**: Structured JSON parsing, action validation, Pydantic argument validation, observation feedback and bounded reasoning loop.
-- **SMT/Z3 Lab → `verifier.py`**: Typed verification payloads, symbolic variables, hard constraints, solver execution, SAT/UNSAT handling and structured verification results.
-
-The system keeps the A\* + Z3 architecture as the core planning and safety mechanism.
+| File                | Purpose                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `models.py`         | Drone models, station grid, obstacles, terrain and charging-pad configuration           |
+| `llm_parser.py`     | Natural-language command parsing, structured task generation and fallback parsing       |
+| `pathfinding.py`    | Terrain-aware A\* pathfinding                                                           |
+| `adaptive_pilot.py` | Lightweight adaptive movement policy                                                    |
+| `verifier.py`       | Z3/SMT route, battery and multi-drone schedule verification                             |
+| `orchestrator.py`   | Integrates parsing, planning, charging, scheduling, verification, execution and logging |
+| `perception.py`     | Noisy sensor simulation and Kalman-based state estimation                               |
+| `database.py`       | SQLite database and event logging                                                       |
+| `dashboard.py`      | Streamlit user interface and live simulation                                            |
+| `Documentation.md`  | Technical description of the system architecture and methodology                        |
 
 ---
 
-## 8. Key Design Principle
+## 8. Algorithmic Foundations
+
+The project uses established algorithmic techniques from the course material as foundations for the implemented components.
+
+The main mappings are:
+
+- **A\*** — node representation, open/closed sets, `g/h/f` scores, priority queue, heuristic calculation, neighbour expansion and path reconstruction.
+- **ReAct / structured parsing** — structured task generation, validation and bounded parser interaction.
+- **Q-learning / adaptive policy** — tabular state/action representation, action selection and Q-value updates for the Adaptive Pilot.
+- **SMT / Z3** — symbolic variables, hard constraints, solver execution, satisfiability checking and structured verification results.
+- **State estimation** — noisy observations and Kalman-filter-based estimation.
+
+These algorithmic foundations are integrated into the drone-routing problem while keeping the formal verification layer independent from the natural-language decision layer.
+
+---
+
+## 9. Key Design Principle
 
 The system separates **proposal** from **execution**:
 
 ```text
-LLM
- ↓
+LLM / Parser
+      ↓
 Proposes structured task
- ↓
+      ↓
 A*
- ↓
+      ↓
 Proposes route
- ↓
-Z3
- ↓
+      ↓
+Adaptive Pilot
+      ↓
+Advises movement behaviour
+      ↓
+Z3 / SMT
+      ↓
 Formally verifies safety
- ↓
+      ↓
 Execution
 ```
 
-The LLM is therefore not trusted to directly control the drone. A proposed action must pass the formal verification layer before it can change the simulated drone state.
+This layered design means that individual components can propose or optimise actions without receiving unrestricted authority over execution.
 
----
+The final execution decision remains subject to the formal verification layer.

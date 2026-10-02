@@ -3,3 +3,4 @@ z3-solver>=4.13
 matplotlib>=3.8
 openai>=1.40
 pydantic>=2.0
+numpy>=1.26

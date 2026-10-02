@@ -149,7 +149,7 @@ DEFAULT_DRONES = [
     Drone("DRONE_01", 8, 0, 1),
     Drone("DRONE_02", 35, 1, 0),
     Drone("DRONE_03", 31, 0, 2),
-    Drone("DRONE_05", 42, 2, 0),
+    Drone("DRONE_04", 42, 2, 0),
 ]
 DEFAULT_CHARGING_PADS = [
     ChargingPad("C01", "Fast", 150.0, 8, 1),

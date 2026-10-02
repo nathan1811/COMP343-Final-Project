@@ -24,6 +24,7 @@ import pathfinding
 import verifier
 from models import Scenario, Drone, ChargingPad, generate_scenario
 from perception import DroneStateEstimator
+from adaptive_pilot import AdaptivePilot
 
 
 STEP_MINUTES = 15.0
@@ -63,6 +64,7 @@ class Trip:
     execution_cells: Optional[List[Tuple[int, int]]] = None
     step_drains: List[float] = field(default_factory=list)
     actual_final_battery: Optional[float] = None
+    pilot_decisions: List[Any] = field(default_factory=list)
 
     @property
     def verified(self) -> bool:
@@ -92,6 +94,9 @@ class StationManager:
         self.station = scenario.station
         self.estimators = {d.id: DroneStateEstimator(d.battery, d.x, d.y)
                            for d in scenario.drones}
+        # Course-derived adaptive pilot. It is advisory; A* and Z3 remain
+        # authoritative for routing and safety.
+        self.adaptive_pilot = AdaptivePilot(seed=self.seed or 0)
         db.seed(scenario.drones, self.db_path)
 
     def load_scenario(self, seed: Optional[int]) -> Scenario:
@@ -192,7 +197,7 @@ class StationManager:
         """Generate the actual random drain for every movement step.
 
         Planning remains conservative: all routing, charging and SMT checks use
-        the 3% upper bound. Execution uses the actual random 1.5%-3% draw for
+        the 3.0% upper bound. Execution uses the actual random 1.5%-3.0% draw for
         each movement step, including the extra 3x multiplier on grey cells.
         """
         if not trip.plan or not trip.plan.cells:
@@ -326,6 +331,25 @@ class StationManager:
                 next_tick = tick + 1
                 blocked = next_cell in reservations.get(next_tick, set())
 
+                # Adaptive pilot: when the next cell is already reserved,
+                # learn/choose a cautious wait before attempting the move.
+                # Conflict resolution still owns the actual reservation rule.
+                terrain = "GREY" if self.station.is_grey(*next_cell) else "NORMAL"
+                pilot_decision = self.adaptive_pilot.choose_action(
+                    terrain, blocked, 50.0, epsilon=0.0
+                )
+                if (not blocked and terrain == "GREY" and
+                        pilot_decision.action == "CAUTIOUS_WAIT"):
+                    # The adaptive pilot can add one cautious 15-minute hold
+                    # before entering an adverse/high-drain cell. This is a
+                    # timing adjustment only; Z3 still verifies the schedule.
+                    timed.append(current)
+                    tick += 1
+                    waits += 1
+                    if waits > max_wait:
+                        return None
+                    next_tick = tick + 1
+
                 if charger_cell is not None and next_cell == charger_cell and charge_ticks:
                     blocked = blocked or any(
                         charger_cell in reservations.get(next_tick + j, set())
@@ -420,7 +444,7 @@ class StationManager:
             return MultiTrip([], 2.0, current_minutes)
 
         # Operator-supplied drain values are retained only for backwards compatibility.
-        # The physical model is now random 1.5%-3% per movement step, and planning
+        # The physical model is now random 1.5%-3.0% per movement step, and planning
         # uses the conservative 3% worst case.
         drain = PLANNING_STEP_DRAIN_PCT
         indexed = list(enumerate(jobs))
@@ -475,6 +499,16 @@ class StationManager:
             # drone wait.
             direct = pathfinding.plan_path(self.station, (drone.x, drone.y), goal)
             direct_energy = direct.cost * drain if direct else float('inf')
+            if direct is not None:
+                pilot_preview = self.adaptive_pilot.route_advice(
+                    direct.cells, self.station, drone.battery
+                )
+                cautious = sum(1 for d in pilot_preview if d.action == "CAUTIOUS_WAIT")
+                trip.log.append(
+                    f"Adaptive Pilot: evaluated {len(pilot_preview)} movement steps; "
+                    f"{cautious} step(s) flagged for cautious handling. "
+                    f"Q-learning policy is advisory; A* and Z3 remain authoritative."
+                )
             chosen = None
 
             if direct is not None and direct_energy <= drone.battery + 1e-9:
@@ -629,7 +663,7 @@ class StationManager:
 
         if task.get("multi"):
             # The command may still contain an old fixed drain value, but the
-            # drone model now uses a random 1.5%-3% draw per movement step.
+            # drone model now uses a random 1.5%-3.0% draw per movement step.
             # Planning uses the 3% worst case for safety.
             drain = PLANNING_STEP_DRAIN_PCT
             jobs = []
@@ -685,7 +719,7 @@ class StationManager:
         log = log if log is not None else []
         destination = destination.upper()
         # The input parameter is kept for API compatibility, but the physical
-        # model is now random 1.5%-3% per movement step. Use the worst case for
+        # model is now random 1.5%-3.0% per movement step. Use the worst case for
         # route/charger selection and formal verification.
         drain_per_cell = PLANNING_STEP_DRAIN_PCT
         deadline_clock = self._clock_to_minutes(deadline_text)
@@ -793,6 +827,20 @@ class StationManager:
                     arrival_minutes=trip.arrival_minutes,
                     deadline_text=deadline_text,
                 )
+
+        # Adaptive pilot is advisory for the single-drone route. It learns local
+        # movement preferences from terrain conditions without replacing A*.
+        if trip.plan is not None and trip.plan.cells:
+            pilot_preview = self.adaptive_pilot.route_advice(
+                trip.plan.cells, self.station, trip.start_battery
+            )
+            trip.pilot_decisions = pilot_preview
+            cautious = sum(1 for d in pilot_preview if d.action == "CAUTIOUS_WAIT")
+            log.append(
+                f"Adaptive Pilot: evaluated {len(pilot_preview)} movement steps; "
+                f"{cautious} step(s) flagged for cautious handling. "
+                f"A* route remains authoritative and Z3 remains the final safety gate."
+            )
 
         # Generate the actual per-step random consumption only after the
         # conservative route/charger/SMT plan has been established.
@@ -906,6 +954,14 @@ class StationManager:
         db.update_drone(trip.drone_id, self.db_path, x=gx, y=gy, battery=left,
                         status="DONE", destination=trip.destination)
         db.update_task_status(trip.task_id, "COMPLETED", self.db_path)
+        if trip.plan is not None and trip.pilot_decisions:
+            self.adaptive_pilot.learn_from_successful_route(
+                trip.plan.cells, trip.pilot_decisions, self.station
+            )
+            trip.log.append(
+                f"Adaptive Pilot learned from successful execution: "
+                f"updated {len(trip.pilot_decisions)} Q-learning state/action pair(s)."
+            )
         trip.driven = True
         trip.log.append(f"{trip.drone_id} reached the {trip.destination} {(gx, gy)} "
                         f"at {self._format_clock(trip.arrival_minutes or trip.current_minutes)} "

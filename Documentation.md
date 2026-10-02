@@ -1,143 +1,422 @@
-Autonomous Drone Routing System — Technical Documentation
+# Autonomous Drone Routing System — Technical Documentation
 
-1. System Overview
+## 1. System Overview
 
-The system is an autonomous Drone routing framework that combines natural-language task interpretation, A\* pathfinding, formal safety verification using Z3, state estimation, and database logging.
+The **Autonomous Drone Routing System** is an autonomous routing framework that combines natural-language task interpretation, A\* pathfinding, adaptive movement decisions, formal safety verification using Z3/SMT, perception and state estimation, execution, and SQLite decision logging.
 
-Overall pipeline:
+The overall system pipeline is:
 
-Operator Command → LLM Parser → A\* Route Planning → Z3 Verification → Execution → Database/Decision Log
+**Operator Command → LLM / Fallback Parser → A\* Route Planning → Adaptive Pilot → Time-Aware Scheduling → Z3 / SMT Verification → Execution → Database / Decision Log**
 
-The system supports two input modes: natural-language commands and manual drone/route parameters.
+The system supports two input modes:
 
-2. Natural-Language Task Parsing
+- Natural-language commands
+- Manual drone and route parameters
 
-For natural-language commands, the system uses GPT-5-mini to convert the operator's instruction into a structured JSON task containing:
+The central design principle is that the language interface and planning components propose actions, while a separate formal verification layer determines whether those actions are safe to execute.
 
-Drone ID
+---
 
-Destination
+## 2. Natural-Language Task Parsing
 
-Battery consumption per cell
+For natural-language commands, the system uses **GPT-5-mini** to convert the operator's instruction into a structured task representation.
 
-The LLM is instructed to return only the required JSON structure.
+The parser handles information including:
 
-The parser then normalises and validates the returned values. If the OpenAI API is unavailable, a regex-based fallback parser is used so the system can continue operating.
+- Drone ID
+- Destination
+- Requested deadline
+- Other supported task constraints
 
-The LLM only proposes the task; it does not decide whether the drone is allowed to execute it. Verification happens separately.
+For multi-drone commands, each explicitly named drone is preserved as a separate task.
 
-3. A\* Route Planning
+For example:
 
-Once the task has been parsed, A\* calculates a route from the drone's current position to the selected destination.
+```text
+Take Drone-03 to the airport and Drone-04 to the airport
+and Drone-01 to the airport and Drone-02 to the airport.
+Reach by 11:00 PM.
+```
 
-The station is represented as a 10×10 grid with:
+produces separate tasks for Drone-03, Drone-04, Drone-01 and Drone-02.
 
-Normal cells — cost 1× battery
+If the OpenAI API is unavailable, a regex-based fallback parser is available for supported command structures.
 
-Grey/toll cells — cost 3× battery
+The language model proposes the structured task. It does **not** determine whether the resulting movement is safe to execute.
 
-Obstacles — impassable
+---
 
-A\* uses a Manhattan-distance heuristic and four-directional movement. Its route cost incorporates the additional battery cost of grey cells, allowing it to account for terrain energy consumption when selecting a route.
+## 3. A\* Route Planning
 
-Other parked drones are temporarily treated as obstacles during route planning, while the destination cells remain accessible.
+Once the task has been parsed, the A\* pathfinding algorithm calculates a route from each drone's current position to the selected destination.
 
-4. Formal Safety Verification with Z3
+The station environment is represented as a **10 × 10 grid** containing:
 
-After A\* generates a route, the system passes the proposed route to the Z3 SMT solver.
+- **Normal cells** — standard movement cost
+- **Grey / toll cells** — higher movement cost
+- **Obstacles** — impassable cells
 
-For every step of the route, Z3 represents the battery level using:
+A\* uses:
 
-Batteryi = Battery(i-1) − Drain × Cell Cost
+- Manhattan-distance heuristic
+- Four-directional movement
+- Terrain-dependent movement costs
+- Open and closed sets
+- `g`, `h` and `f` scores
+- Parent-based path reconstruction
 
-with the safety condition:
+The route cost incorporates the additional battery cost associated with grey cells.
 
-Battery_i ≥ 0
+The planner can temporarily account for the positions of other drones when generating individual routes, while the final multi-drone schedule is handled separately.
 
-for every step.
+---
 
-The verifier checks two conditions:
+## 4. Battery Model
 
-A valid route exists.
+The simulated drone movement uses a random actual battery drain of approximately **1.5%–3.0% per movement step**.
 
-The drone's battery never becomes negative during that route.
+For planning and formal safety verification, the system uses **3.0% as the worst-case movement-drain bound**.
 
-If the constraints are satisfiable, the plan is marked verified. If they are not, the plan is rejected and the drone does not move.
+This creates a conservative distinction between:
 
-This creates a separation between AI-based decision making and formal safety enforcement.
+- Actual simulated battery consumption
+- Worst-case planning consumption
 
-5. Execution and Fail-Safe Behaviour
+Each movement step represents **15 minutes** of simulated time.
 
-The system follows a verify-before-execute architecture.
+The system also maintains a **15% reserve battery requirement** when determining whether a drone can safely complete a delivery or whether charging is required.
 
-A proposed trip is first parsed, planned, and verified. Only if the plan is verified can the deliver() function update the drone's position and battery. Rejected plans leave the drone stationary.
+The battery model can be represented as:
 
-The dashboard provides two operations:
+```text
+Battery(i) = Battery(i-1) - Drain × CellCost
+```
 
-Verify Plan — calculates and verifies the route without moving the drone.
+---
 
-Drive — verifies the route and executes it only if verification succeeds.
+## 5. Adaptive Pilot
 
-6. Perception and State Estimation
+The system includes a lightweight **Adaptive Pilot** as an advisory decision layer between route planning and formal verification.
 
-The system simulates imperfect drone perception. Instead of relying on perfect sensor measurements, it generates noisy battery and position readings.
+The Adaptive Pilot uses a tabular Q-learning-style structure.
 
-A lightweight 1D Kalman filter is used to estimate:
+Its state representation includes factors such as:
 
-Battery level
+- Terrain condition
+- Local congestion
+- Battery band
 
-X-position
+The available actions are:
 
-Y-position
+```text
+PROCEED
+CAUTIOUS_WAIT
+```
 
-The dashboard displays the resulting True → Noisy → Estimated state.
+The pilot can therefore decide whether to continue normally or insert a short wait before entering a movement segment.
 
-7. Database and Decision Logging
+The Adaptive Pilot is intentionally constrained:
 
-The system uses SQLite as its persistent memory layer.
+- It does not generate the spatial route.
+- It does not replace A\*.
+- It cannot remove an obstacle.
+- It cannot bypass battery safety constraints.
+- It cannot bypass Z3 verification.
+- It cannot force execution of an unverified schedule.
 
-It stores:
+This keeps the adaptive layer advisory while preserving the deterministic planning and formal safety architecture.
 
-Drones — current battery, position, status, and destination
+The conceptual flow is:
 
-Tasks — operator commands and their verification/execution status
+```text
+A* Route
+   ↓
+Adaptive Pilot
+   ↓
+Movement Advice
+   ↓
+Z3 Verification
+   ↓
+Execution
+```
 
-Events — timestamped system events and decisions
+---
 
-The system records events such as task parsing, verification success/failure, and trip completion, creating an auditable decision history.
+## 6. Automatic Charging
 
-8. Overall Architecture
+Charging is handled automatically when a drone does not have sufficient battery to safely reach its destination while maintaining the required reserve.
 
-The implemented architecture can be summarised as:
+The system first checks whether a direct destination route is feasible.
 
-Natural Language
-↓
-LLM → Structured JSON Task
-↓
-A\* → Terrain-aware Route
-↓
-Z3 → Formal Battery Safety Verification
-↓
-Verified?
-↙ ↘
-No Yes
-↓ ↓
-Reject Execute
-↓
-SQLite + Decision Log
+If additional energy is required, it searches for a suitable charging pad and plans:
 
-The central design principle is that the LLM and path planner can propose actions, but formal verification controls whether those actions can actually be executed.
+```text
+Drone → Charging Pad → Destination
+```
 
-9. Future Goals
+The required charging target is based on:
 
-The next stage would extend the current routing system toward more adaptive decision-making:
+- Energy required for the remaining route
+- Required reserve battery
+- Battery available when the drone reaches the charging pad
 
-RL-based multi-objective optimisation balancing travel time, battery consumption, and congestion.
+The system rejects a charging plan if the required target exceeds 100%.
 
-Dynamic re-planning when road or drone conditions change.
+Charging time is calculated from the required energy and the charging-pad power.
 
-Charging-aware routing incorporating charging_pad availability and charging decisions.
+The natural-language operator does not need to manually select a charging percentage.
 
-Multi-drone coordination for conflicts and shared road resources (future extension).
+---
 
-These would extend the existing A\* + Z3 architecture rather than replacing its formal safety layer.
+## 7. Multi-Drone Coordination
+
+When several drones are assigned tasks simultaneously, the system creates a time-aware schedule.
+
+The scheduling rules are:
+
+1. Two drones cannot occupy the **same tile at the same time**.
+2. Two drones cannot use the **same charging pad at the same time**.
+3. Drones may use the same route at different times.
+4. A drone may pass through another drone's previous path after that drone has cleared the cell.
+5. There is no additional edge-swap restriction.
+
+If a conflict occurs, the scheduler can insert waiting time into a route rather than unnecessarily rejecting the spatial route.
+
+When a conflict requires prioritisation, the starting battery level is used as the priority signal, with the lower-starting-battery drone receiving priority.
+
+The resulting time-expanded schedule is then passed to Z3 for formal verification.
+
+---
+
+## 8. Formal Safety Verification with Z3
+
+After route planning and scheduling, the proposed plan is passed to the **Z3 SMT solver**.
+
+For battery safety, the verifier represents the battery evolution using:
+
+```text
+Battery(i) = Battery(i-1) - Drain × CellCost
+```
+
+and requires:
+
+```text
+Battery(i) ≥ 0
+```
+
+for every relevant movement step.
+
+For multi-drone execution, the verifier also checks the time-expanded schedule.
+
+The verifier checks that:
+
+1. A valid route exists.
+2. Battery constraints remain satisfied.
+3. Two drones are not assigned to the same tile at the same time.
+4. Shared charging resources are not simultaneously occupied.
+5. The proposed schedule satisfies the required formal constraints.
+
+If the constraints are satisfiable, the plan is marked **verified**.
+
+If the constraints are unsatisfiable, the plan is rejected and the affected drone does not execute the proposed movement.
+
+---
+
+## 9. Execution and Fail-Safe Behaviour
+
+The system follows a **verify-before-execute** architecture.
+
+A proposed trip is first:
+
+1. Parsed
+2. Planned using A\*
+3. Adapted/scheduled where necessary
+4. Verified using Z3
+5. Executed only after successful verification
+
+The dashboard provides two primary operations:
+
+### Verify Plan
+
+Calculates the proposed route and verifies it without moving the drone.
+
+### Deliver
+
+Verifies the proposed route and executes it only if verification succeeds.
+
+If verification fails, the drone remains stationary.
+
+This provides a clear separation between decision proposal and state-changing execution.
+
+---
+
+## 10. Perception and State Estimation
+
+The system simulates imperfect drone perception rather than assuming that all sensor measurements are perfectly accurate.
+
+It generates noisy measurements of:
+
+- Battery level
+- X-position
+- Y-position
+
+A lightweight **1D Kalman filter** is then used to estimate each state variable.
+
+The dashboard displays:
+
+```text
+True State → Noisy Measurement → Estimated State
+```
+
+This demonstrates how the system can maintain an estimated internal state when simulated sensor observations contain noise.
+
+---
+
+## 11. Database and Decision Logging
+
+The system uses **SQLite** as its persistent memory and logging layer.
+
+The database stores information relating to:
+
+### Drones
+
+- Current battery
+- Current position
+- Status
+- Destination
+
+### Tasks
+
+- Operator commands
+- Verification status
+- Execution status
+
+### Events
+
+- Timestamped system events
+- Decisions
+- Verification outcomes
+- Execution events
+
+The system records events such as task parsing, verification success or failure, scheduling decisions, and trip completion.
+
+This creates an auditable decision history that can be inspected through the dashboard.
+
+---
+
+## 12. Streamlit Dashboard
+
+The Streamlit dashboard provides the operator interface for the system.
+
+The dashboard includes:
+
+- Natural-language command input
+- Manual drone input
+- Map seed selection
+- Verify Plan control
+- Deliver control
+- Live station map
+- Drone status table
+- Charging-pad status
+- Multi-drone ETA information
+- Verification panel
+- AI decision log
+- Perception panel
+- SQLite database viewer
+
+The default demonstration uses map seed:
+
+```text
+8695665
+```
+
+and the default natural-language command:
+
+```text
+Take Drone-03 to the airport and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
+```
+
+---
+
+## 13. Overall Architecture
+
+```text
+                         Natural Language
+                               ↓
+                    LLM / Fallback Parser
+                               ↓
+                      Structured Tasks
+                               ↓
+                              A*
+                               ↓
+                    Terrain-Aware Routes
+                               ↓
+                       Adaptive Pilot
+                               ↓
+                  Time-Aware Scheduling
+                               ↓
+                          Z3 / SMT
+                               ↓
+                         Verified?
+                       ↙         ↘
+                    Reject      Execute
+                                  ↓
+                         SQLite / Dashboard
+```
+
+The architecture deliberately separates task interpretation, route generation, adaptive movement advice, scheduling, formal verification, execution, and memory.
+
+The language model and route planner can propose actions, but **formal verification acts as the safety gate before execution**.
+
+---
+
+## 14. Algorithmic Foundations
+
+The project uses established algorithmic techniques as foundations for its system components.
+
+The main technical foundations include:
+
+- **A\*** for grid-based route planning and terrain-aware cost calculation.
+- **Structured language parsing** for converting operator instructions into machine-readable tasks.
+- **Q-learning-style tabular decision making** for the Adaptive Pilot.
+- **SMT/Z3 constraint solving** for formal route, battery and multi-drone safety verification.
+- **Kalman filtering** for noisy state estimation.
+- **SQLite** for persistent memory and event logging.
+
+These components are integrated as separate layers so that adaptive or probabilistic decision-making does not replace the formal verification layer.
+
+---
+
+## 15. Key Design Principle
+
+The system separates **proposal** from **execution**:
+
+```text
+LLM / Parser
+      ↓
+Proposes structured task
+      ↓
+A*
+      ↓
+Proposes route
+      ↓
+Adaptive Pilot
+      ↓
+Provides movement advice
+      ↓
+Time-Aware Scheduler
+      ↓
+Constructs executable schedule
+      ↓
+Z3 / SMT
+      ↓
+Formally verifies safety
+      ↓
+Execution
+```
+
+The LLM is therefore not trusted to directly control the drone.
+
+A proposed action must pass the formal verification layer before it can change the simulated drone state.
+
+This separation allows the project to combine natural-language interaction, classical planning, adaptive decision-making, perception, and formal verification within a single autonomous routing framework.

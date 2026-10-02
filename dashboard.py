@@ -1,11 +1,3 @@
-"""
-dashboard.py  --  run with:  streamlit run dashboard.py
-
-Sidebar: choose the simulated time of day and operator command. Natural-language
-commands may include a deadline ('by 10:30 AM') and charging target ('charge to 80%').
-Each movement step takes 15 minutes. If the drone cannot reach its destination,
-the planner selects a viable charging pad and computes charging time from pad power.
-"""
 import random
 import time
 from datetime import time as dt_time
@@ -24,8 +16,8 @@ if st.session_state.get("app_version") != APP_VERSION:
     st.session_state.clear()
     st.session_state.app_version = APP_VERSION
     st.session_state.manager = StationManager(reset=True)
-    st.session_state.manager.load_scenario(2026)
-    st.session_state.seed = 2026
+    st.session_state.manager.load_scenario(8695665)
+    st.session_state.seed = 8695665
     st.session_state.trip = None
     st.session_state.multi_trip = None
 
@@ -221,8 +213,9 @@ with st.sidebar:
     if mode == "Natural language":
         command = st.text_area(
             "Instruction", height=150,
-            value=("Take Drone-01 to the supermarket and Drone-02 to the airport. "
-                   "Reach by 11:00 AM."),
+            value=("Take Drone-03 to the supermarket and Drone-04 to the airport and "
+           "Drone-01 to the airport and Drone-02 to the airport. "
+           "Reach by 11:00 PM."),
         )
         st.info(
             "Use one natural-language command for one or many drones. "
@@ -617,7 +610,8 @@ with col_log:
     if multi_trip:
         combined_log = []
         for t in multi_trip.trips:
-            combined_log.append(f"[{t.drone_id}] "+"\n".join(display_decision_log(t.log)))
+            combined_log.append(
+    f"[{t.drone_id}]\n{display_decision_log(t.log)}")
         st.code("\n\n".join(combined_log), language=None)
     elif trip:
         st.code(display_decision_log(trip.log), language=None)
