@@ -425,7 +425,17 @@ The final execution decision remains subject to the formal verification layer.
 
 Experiment tracking and project logs:
 
-**W&B Project:** [Add W&B project/report link here]
+**W&B Project:** https://wandb.ai/nathand1811-krea-university/autonomous-drone-routing
+
+The project includes `evaluate.py`, which evaluates four fixed drone-to-destination scenarios using a seeded environment and logs the results to Weights & Biases.
+
+The evaluation achieved:
+
+- 4/4 scenarios verified by the Z3 safety verifier (100% verification rate)
+- Mean route length: 11 movement steps
+- Mean arrival time: 170.28 minutes
+- Mean final battery: 22.91%
+- 2/4 scenarios required charging
 
 ---
 
