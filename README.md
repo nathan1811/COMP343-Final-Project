@@ -1,5 +1,11 @@
 # Autonomous Drone Routing System
 
+GitHub Repository: https://github.com/nathan1811/COMP343-Final-Project
+
+## Demo
+
+![Autonomous Drone Routing System Demo](demo.gif)
+
 ## 1. System Overview
 
 The **Autonomous Drone Routing System** is an autonomous routing framework that combines natural-language task interpretation, A\* pathfinding, adaptive movement decisions, formal safety verification using Z3/SMT, perception and state estimation, execution, and SQLite decision logging.
@@ -27,7 +33,7 @@ Verified?
  ↓           ↓
 Reject     Execute
              ↓
-       SQLite + Decision Log
+        SQLite + Decision Log
 ```
 
 The project supports both **natural-language input** and **manual input** through the Streamlit dashboard.
@@ -199,7 +205,7 @@ This creates an auditable record of system decisions and execution history.
 The Streamlit dashboard opens with the following default multi-drone command:
 
 ```text
-Take Drone-03 to the supermerket and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
+Take Drone-03 to the supermarket and Drone-04 to the airport and Drone-01 to the airport and Drone-02 to the airport. Reach by 11:00 PM.
 ```
 
 The default map seed is:
@@ -214,34 +220,34 @@ Another map seed to try:
 9385349
 ```
 
-The demonstration therefore starts with four drones assigned to the airport and an 11:00 PM deadline.
+The demonstration therefore starts with four drones assigned to destinations, with Drone-03 going to the supermarket and the other three drones going to the airport, with an 11:00 PM deadline.
 
 ---
 
 ## 4. System Architecture
 
 ```text
-                         Natural Language
+                          Natural Language
                                ↓
-                    LLM / Fallback Parser
+                     LLM / Fallback Parser
                                ↓
-                      Structured Tasks
+                       Structured Tasks
                                ↓
                               A*
                                ↓
-                    Terrain-Aware Routes
+                     Terrain-Aware Routes
                                ↓
-                       Adaptive Pilot
+                        Adaptive Pilot
                                ↓
-                  Time-Aware Scheduling
+                   Time-Aware Scheduling
                                ↓
-                          Z3 / SMT
+                           Z3 / SMT
                                ↓
-                         Verified?
-                        ↙         ↘
-                     Reject      Execute
+                          Verified?
+                         ↙         ↘
+                      Reject      Execute
                                   ↓
-                         SQLite / Dashboard
+                          SQLite / Dashboard
 ```
 
 The architecture deliberately separates:
@@ -280,17 +286,27 @@ cd "$HOME\Downloads\drone_delivery_project"
 pip install -r requirements.txt
 ```
 
-### Step 3 — Set the OpenAI API key
+### Step 3 — Configure the OpenAI API key
 
-Before starting Streamlit:
+The repository includes `.env.example` as a template.
+
+Create a local `.env` file from the template:
 
 ```powershell
-$env:OPENAI_API_KEY="YOUR_API_KEY_HERE"
+Copy-Item .env.example .env
 ```
 
-Do **not** commit or share your real API key in the project files or Git repository.
+Open `.env` and replace:
 
-This environment variable applies to the current PowerShell session.
+```text
+OPENAI_API_KEY=your_api_key_here
+```
+
+with your own OpenAI API key.
+
+The `.env` file is included in `.gitignore` and must never be committed to GitHub.
+
+The application reads the API key from the `OPENAI_API_KEY` environment variable.
 
 ### Step 4 — Start the Streamlit dashboard
 
@@ -311,9 +327,11 @@ Open that address in your browser if it does not open automatically.
 ```powershell
 cd "path\to\drone_delivery_project"
 pip install -r requirements.txt
-$env:OPENAI_API_KEY="YOUR_API_KEY_HERE"
+Copy-Item .env.example .env
 streamlit run dashboard.py
 ```
+
+Before running the application for the first time, open `.env` and add your own API key.
 
 ---
 
@@ -387,3 +405,32 @@ Execution
 This layered design means that individual components can propose or optimise actions without receiving unrestricted authority over execution.
 
 The final execution decision remains subject to the formal verification layer.
+
+---
+
+## 10. Limitations and Safety Considerations
+
+- The system is a simulation and does not control physical drones.
+- Battery consumption is simulated rather than measured from physical hardware.
+- The perception system uses simulated noisy observations.
+- The LLM/parser can produce incorrect task interpretations, so its output is validated before execution.
+- A\* proposes routes but does not independently guarantee complete system safety.
+- The Adaptive Pilot is advisory and cannot bypass the verification layer.
+- Z3/SMT verification is used as the final safety gate before simulated execution.
+- The current environment models a fixed grid, limited destinations, and simulated charging pads.
+
+---
+
+## 11. Weights & Biases
+
+Experiment tracking and project logs:
+
+**W&B Project:** [Add W&B project/report link here]
+
+---
+
+## 12. Testing and Evaluation
+
+The project includes testing and evaluation procedures for checking route planning, battery constraints, multi-drone scheduling, charging behaviour, and formal verification.
+
+The evaluation files and instructions are included in the repository.
