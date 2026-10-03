@@ -5,3 +5,4 @@ openai>=1.40
 pydantic>=2.0
 numpy>=1.26
 wandb==0.30.0
+python-dotenv==1.0.1

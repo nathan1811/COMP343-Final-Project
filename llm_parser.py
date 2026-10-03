@@ -1,8 +1,11 @@
-import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+import json
+from typing import Dict, Any, Optional, List
 
+from dotenv import load_dotenv
+
+load_dotenv()
 from pydantic import BaseModel, Field, ValidationError
 
 OPENAI_MODEL = "gpt-5-mini"
